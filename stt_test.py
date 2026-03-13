@@ -6,6 +6,10 @@ import pygame
 import asyncio
 import os
 
+
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+
+
 # --- 1. 초기 세팅 ---
 print("🚀 [시스템] 시스템 초기화 중...")
 # TTS 재생을 위한 pygame 믹서 초기화
@@ -17,6 +21,15 @@ stt_model = WhisperModel("base", device="cpu", compute_type="int8")
 print("✅ [시스템] 준비 완료!\n" + "="*50)
 
 # --- 2. 핵심 함수 정의 ---
+
+def get_stt_hints(file_path="whisper_hint.txt"):
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # 줄바꿈을 쉼표로 바꿔서 한 줄의 프롬프트로 만듭니다.
+            return f.read().replace('\n', ', ') 
+    return ""
+
+
 
 def read_agent_md():
     """Agent.md 파일을 읽어와서 시스템 프롬프트로 사용할 문자열 반환"""
@@ -33,23 +46,29 @@ def listen_to_user():
     """마이크를 열어 사용자의 음성을 녹음하고 텍스트로 변환"""
     recognizer = sr.Recognizer()
     microphone = sr.Microphone()
+    
+    # 🚨 [수정 1] 위에서 만든 함수를 불러와서 hints 변수에 확실히 넣어줍니다!
+    hints = get_stt_hints()
 
     with microphone as source:
         print("\n🎧 주변 소음 적응 중...")
-        recognizer.adjust_for_ambient_noise(source, duration=1.0)
+        # 🚨 [수정 2] 적응 시간을 0.5초로 줄이고, 강제로 귀를 아주 밝게(300) 만듭니다!
+        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        recognizer.energy_threshold = 300  
         recognizer.pause_threshold = 1.2 
         
-        print(" 말씀해 주세요! (듣는 중...)")
+        print("🟢 말씀해 주세요! (듣는 중...)")
         try:
             audio_data = recognizer.listen(source, timeout=5, phrase_time_limit=15)
-            print(" 음성 인식 중...")
+            print("🔄 음성 인식 중...")
             
             # 임시 파일로 저장 후 faster-whisper로 변환
             temp_wav = "temp_voice.wav"
             with open(temp_wav, "wb") as f:
                 f.write(audio_data.get_wav_data())
             
-            segments, _ = stt_model.transcribe(temp_wav, beam_size=5, language="ko")
+            # 여기서 hints 변수를 무사히 사용하게 됩니다.
+            segments, _ = stt_model.transcribe(temp_wav, beam_size=5, language="ko", initial_prompt=hints)
             text = "".join([segment.text for segment in segments])
             
             if os.path.exists(temp_wav): os.remove(temp_wav)
@@ -59,7 +78,8 @@ def listen_to_user():
             print("💤 (입력 없음)")
             return None
         except Exception as e:
-            print(f" 음성 인식 오류: {e}")
+            # 에러가 나면 화면에 빨간색으로 확실하게 보여주도록 수정
+            print(f"❌ 음성 인식 오류 발생: {e}") 
             return None
 
 def think_llm(user_text, agent_prompt):

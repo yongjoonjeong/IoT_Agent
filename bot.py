@@ -33,8 +33,8 @@ async def on_message(message):
         status_msg = await message.channel.send("⏳ 로컬 LLM 이 명령을 분석하고 있습니다...")
 
         try:
-            # 2. Ollama 비동기 호출 (Qwen 3.5 4B 모델 사용)
-            response = await AsyncClient().chat(model='qwen3.5:4b', messages=[
+            # 2. Ollama 비동기 호출 (Qwen 3.5 4B 모델 사용
+            response = await AsyncClient().chat(model='llama3.2:3b', messages=[ #model : llama3.2:3b 고정
                 {
                     'role': 'system', 
                     'content': '너는 라즈베리파이 IoT 제어 AI야. 사용자의 요청을 분석해서 반드시 {"action": "execute", "target": "장치명", "value": "값"} 형태의 순수 JSON으로만 대답해. 부가 설명이나 마크다운은 절대 쓰지 마.'
