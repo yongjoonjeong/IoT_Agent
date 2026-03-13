@@ -65,31 +65,47 @@ def handle_direct_command(user_text):
     if not found_target:
         return False, None
         
-    # 액션 및 값 파싱 (간단한 키워드 매칭)
-    action = None
-    if "켜" in user_text:
-        action = "켜줘"
-    elif "꺼" in user_text:
-        action = "꺼줘"
-        
-    val_match = re.search(r"(\d+)(도|단)", user_text)
-    value = val_match.group(1) if val_match else None
+    print(f"[직접 제어 감지] 대상: {found_target}")
     
-    # 파라미터 부족 시 되묻기
-    if not action:
-        return True, f"{found_target}을 켤까요, 아니면 끌까요?"
-    if found_target == "에어컨" and action == "켜줘" and not value:
-        return True, "에어컨 온도를 몇 도로 맞출까요?"
-    elif found_target in ["조명", "환풍기"] and action == "켜줘" and not value:
-        return True, f"{found_target}을 몇 단으로 켤까요?"
-        
-    # 실행 로직
-    # 실제 하드웨어 제어 스크립트 연동 자리에 위치
-    print(f"[직접 제어 실행] 대상: {found_target}, 명령: {action}, 값: {value}")
+    # 1. 에어컨 처리를 하부 스크립트로 완전 위임
     if found_target == "에어컨":
-        subprocess.run(["python3", "Aircon/aircon.py", str(value) if value else action])
+        try:
+            result = subprocess.run(
+                ["python3", "Aircon/aircon.py", user_text], 
+                capture_output=True, 
+                text=True
+            )
+            output = result.stdout.strip()
+            
+            try:
+                # JSON 응답 파싱
+                data = json.loads(output)
+                speech = data.get("speech", "에어컨 제어 명령이 전송되었습니다.")
+                return True, speech
+            except json.JSONDecodeError:
+                print(f"[오류] 에어컨 스크립트 응답이 올바르지 않음: {output}")
+                return True, "에어컨 제어 중 스크립트 오류가 발생했습니다."
+                
+        except Exception as e:
+            print(f"[오류] 에어컨 스크립트 실행 실패: {e}")
+            return True, "에어컨 스크립트를 실행할 수 없습니다."
+            
+    # 2. 기타 기기 (차후 에어컨과 동일하게 모듈화 가능)
+    elif found_target in ["조명", "환풍기"]:
+        action = None
+        if "켜" in user_text: action = "켜줘"
+        elif "꺼" in user_text: action = "꺼줘"
         
-    return True, f"{found_target}을 {value + ('도' if found_target == '에어컨' else '단') + '로 ' if value else ''}{action} 처리했습니다."
+        val_match = re.search(r"(\d+)(단)", user_text)
+        value = val_match.group(1) if val_match else None
+        
+        if not action:
+            return True, f"{found_target}을 켤까요, 아니면 끌까요?"
+        if action == "켜줘" and not value:
+            return True, f"{found_target}을 몇 단으로 켤까요?"
+            
+        print(f"[임시 제어] 대상: {found_target}, 명령: {action}, 값: {value}")
+        return True, f"{found_target}을 {value + '단으로 ' if value else ''}{action} 처리했습니다."
 
 CONV_DIR = "@conversation"
 
