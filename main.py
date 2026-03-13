@@ -111,7 +111,7 @@ def save_conversation(user_text, llm_reply):
         print(f"[오류] 대화 기록 저장 실패: {e}")
 
 async def get_relevant_context(user_text):
-    """기존 대화 기록 중 연관성 있는 내용을 추출하여 반환 (llama 1b 활용)"""
+    """기존 대화 기록 중 연관성 있는 내용을 추출하여 반환 (llama 3b 활용)"""
     if not os.path.exists(CONV_DIR):
         return ""
         
@@ -131,7 +131,7 @@ async def get_relevant_context(user_text):
     try:
         # 1. llama 1b로 키워드 추출
         extract_prompt = "다음 문장에서 중요한 단어나 개체명(예: 사람 이름, 장소, 사물 등)만 쉼표로 구분해서 말해. 부가 설명 절대 금지."
-        resp = await AsyncClient().chat(model='llama3.2:1b', messages=[
+        resp = await AsyncClient().chat(model='llama3.2:3b', messages=[
             {'role': 'system', 'content': extract_prompt},
             {'role': 'user', 'content': user_text}
         ])
@@ -198,7 +198,7 @@ async def process_command(user_text, require_alias=False):
     system_prompt = f"{agent_prompt}\n\n[관련 스킬 및 상태]\n{skill_context}\n{past_logic}"
     
     try:
-        response = await AsyncClient().chat(model='llama3.1', messages=[
+        response = await AsyncClient().chat(model='llama3.2:3b', messages=[
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': user_text}
         ], keep_alive=-1)
@@ -329,11 +329,20 @@ async def on_message(message):
     if not user_command:
         return
         
-    status_msg = await message.channel.send("LLM이 명령을 분석 중입니다...")
+    # 1. 우선 직접 제어 가능한 명령인지 확인 (별명 체크 없이 바로 실행)
+    is_direct, direct_reply = handle_direct_command(user_command)
     
-    reply_text = await process_command(user_command)
+    if is_direct:
+        # 직접 제어인 경우 LLM을 거치지 않고 피드백 전송
+        await message.channel.send(f"**[로컬 직접 제어]** {direct_reply}")
+        return
+
+    # 2. 직접 제어가 아닌 경우에만 LLM 분석 진행
+    status_msg = await message.channel.send("⏳ 로컬 LLM이 명령을 분석 중입니다...")
     
-    await status_msg.edit(content=f"**[실행 결과]** {reply_text}")
+    reply_text = await process_command(user_command, require_alias=False)
+    
+    await status_msg.edit(content=f"**[AI 실행 결과]** {reply_text}")
 
 # 봇 실행
 client.run(DISCORD_TOKEN)
