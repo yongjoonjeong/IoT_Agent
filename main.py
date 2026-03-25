@@ -80,6 +80,11 @@ def handle_direct_command(user_text):
             try:
                 # JSON 응답 파싱
                 data = json.loads(output)
+                
+                # 사용자가 '에어컨'이라고만 하고 온도를 명시하지 않은 경우 등 파라미터가 비어있으면 LLM으로 넘김
+                if data.get("status") == "incomplete":
+                    return False, None
+                    
                 speech = data.get("speech", "에어컨 제어 명령이 전송되었습니다.")
                 return True, speech
             except json.JSONDecodeError:
@@ -99,10 +104,9 @@ def handle_direct_command(user_text):
         val_match = re.search(r"(\d+)(단)", user_text)
         value = val_match.group(1) if val_match else None
         
-        if not action:
-            return True, f"{found_target}을 켤까요, 아니면 끌까요?"
-        if action == "켜줘" and not value:
-            return True, f"{found_target}을 몇 단으로 켤까요?"
+        # 파라미터가 부족하면 그냥 LLM이 자연스럽게 되묻도록 넘김
+        if not action or (action == "켜줘" and not value):
+            return False, None
             
         print(f"[임시 제어] 대상: {found_target}, 명령: {action}, 값: {value}")
         return True, f"{found_target}을 {value + '단으로 ' if value else ''}{action} 처리했습니다."
@@ -190,18 +194,21 @@ async def speak_text(text):
 
 # --- 3. 핵심 AI 처리 파이프라인 ---
 async def process_command(user_text, require_alias=False):
-    """사용자의 입력을 분석하고 스크립트를 실행한 뒤 대답을 반환합니다."""
+    """
+    사용자의 입력을 분석하고 스크립트를 실행한 뒤 대답을 반환합니다.
+    리턴값: (source: "direct" | "llm" | "error" | None, reply_text: str | None)
+    """
     
     agent_prompt = read_file("Agent.md")
     alias = get_alias(agent_prompt)
     
     if require_alias and alias not in user_text:
-        return None # 별명이 불리지 않으면 무시
+        return None, None # 별명이 불리지 않으면 무시
         
     # 직접 제어 가능한지 확인 (LLM 생략)
     is_direct, direct_reply = handle_direct_command(user_text)
     if is_direct:
-        return direct_reply
+        return "direct", direct_reply
     
     # 키워드 검사 및 스킬 문서 추가
     skill_context = ""
@@ -243,14 +250,14 @@ async def process_command(user_text, require_alias=False):
                 pass 
                 
             save_conversation(user_text, speech)
-            return speech
+            return "llm", speech
             
         except json.JSONDecodeError:
             # JSON 포맷이 아닐 경우(일반 대화) 그대로 반환
-            return llm_reply
+            return "llm", llm_reply
             
     except Exception as e:
-        return f"처리 중 오류가 발생했습니다. {e}"
+        return "error", f"처리 중 오류가 발생했습니다. {e}"
 
 # --- 4. 백그라운드 마이크 대기 루프 ---
 def listen_microphone():
@@ -280,8 +287,11 @@ def listen_microphone():
         recognizer.pause_threshold = 1.2
         try:
             audio = recognizer.listen(source, timeout=2, phrase_time_limit=10)
+            
             with open("temp.wav", "wb") as f:
                 f.write(audio.get_wav_data())
+                
+            print("🎙️ [시스템] 목소리 감지 완료, 텍스트 변환(STT) 진행 중...")
             segments, _ = stt_model.transcribe("temp.wav", language="ko", initial_prompt=hints)
             text = "".join([s.text for s in segments]).strip()
             return text if text else None
@@ -305,13 +315,14 @@ async def voice_background_task():
             print(f"[음성 인식] {user_text}")
             
             # 음성 입력은 별명 필수
-            reply_text = await process_command(user_text, require_alias=True)
+            source, reply_text = await process_command(user_text, require_alias=True)
             
             if reply_text:
                 channel = client.get_channel(LOG_CHANNEL_ID)
                 if channel:
                     await channel.send(f"**[음성 명령 수신]** {user_text}")
-                    await channel.send(f"**[AI 로컬 제어/응답]** {reply_text}")
+                    prefix = "**🤖 [로컬 하드웨어 봇] 엣지단 즉시 제어**" if source == "direct" else "**🧠 [로컬 LLM 답변] 문맥 추론**"
+                    await channel.send(f"{prefix}\n{reply_text}")
                     
                 await speak_text(reply_text)
 
@@ -345,20 +356,17 @@ async def on_message(message):
     if not user_command:
         return
         
-    # 1. 우선 직접 제어 가능한 명령인지 확인 (별명 체크 없이 바로 실행)
-    is_direct, direct_reply = handle_direct_command(user_command)
+    # 명령어 처리 (직접 제어이든 LLM 이든 내부에서 알아서 분기)
+    status_msg = await message.channel.send("⏳ 명령을 처리 중입니다...")
     
-    if is_direct:
-        # 직접 제어인 경우 LLM을 거치지 않고 피드백 전송
-        await message.channel.send(f"**[로컬 직접 제어]** {direct_reply}")
-        return
-
-    # 2. 직접 제어가 아닌 경우에만 LLM 분석 진행
-    status_msg = await message.channel.send("⏳ 로컬 LLM이 명령을 분석 중입니다...")
+    source, reply_text = await process_command(user_command, require_alias=False)
     
-    reply_text = await process_command(user_command, require_alias=False)
-    
-    await status_msg.edit(content=f"**[AI 실행 결과]** {reply_text}")
+    if source == "direct":
+        await status_msg.edit(content=f"**🤖 [로컬 하드웨어 봇] 엣지단 즉시 제어**\n{reply_text}")
+    elif source == "llm":
+        await status_msg.edit(content=f"**🧠 [로컬 LLM 답변] 문맥 추론**\n{reply_text}")
+    else:
+        await status_msg.edit(content=f"**[시스템 오류]**\n{reply_text}")
 
 # 봇 실행
 client.run(DISCORD_TOKEN)
