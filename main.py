@@ -11,7 +11,6 @@ import pygame
 import re
 import datetime
 
-
 # os.environ["SDL_AUDIODRIVER"] = "dummy" # audio 부분 일단 주석 처리. 추후 오디오 연결하기 
 
 # --- 1. 환경 설정 및 초기화 ---
@@ -22,40 +21,35 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# pygame.mixer.init()
-
 print("[시스템] STT 모델 로딩 중...")
 stt_model = WhisperModel("base", device="cpu", compute_type="int8")
 print("[시스템] 초기화 완료!")
 
-# 디스코드 음성 로그를 출력할 채널 ID를 저장할 변수
 LOG_CHANNEL_ID = None 
 
 # --- 2. 헬퍼 함수 정의 ---
 def read_file(file_path):
-    """파일을 읽어오는 함수"""
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
     return ""
 
 def get_stt_hints(file_path="whisper_hint.txt"):
-    """STT 힌트 문자열 생성"""
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read().replace('\n', ', ') 
     return ""
 
 def get_alias(agent_text):
-    """Agent.md에서 <별명> 파싱"""
     match = re.search(r"<별명>\s*:\s*(.+)", agent_text)
     if match:
         return match.group(1).strip()
-    return "자비스" # 기본값
+    return "자비스" 
 
 def handle_direct_command(user_text):
-    """LLM을 거치지 않고 직접 제어하는 로직. 처리되었으면 (True, 응답음성), 아니면 (False, None) 반환"""
-    targets = ["에어컨", "조명", "환풍기"]
+    """LLM을 거치지 않고 직접 제어하는 로직"""
+    # 🌟 타겟에 전등, 라이트 추가
+    targets = ["에어컨", "조명", "전등", "라이트", "환풍기"]
     found_target = None
     for t in targets:
         if t in user_text:
@@ -67,7 +61,7 @@ def handle_direct_command(user_text):
         
     print(f"[직접 제어 감지] 대상: {found_target}")
     
-    # 1. 에어컨 처리를 하부 스크립트로 완전 위임
+    # 1. 에어컨 제어 로직
     if found_target == "에어컨":
         try:
             result = subprocess.run(
@@ -76,27 +70,55 @@ def handle_direct_command(user_text):
                 text=True
             )
             output = result.stdout.strip()
-            
             try:
-                # JSON 응답 파싱
                 data = json.loads(output)
-                
-                # 사용자가 '에어컨'이라고만 하고 온도를 명시하지 않은 경우 등 파라미터가 비어있으면 LLM으로 넘김
                 if data.get("status") == "incomplete":
                     return False, None
-                    
                 speech = data.get("speech", "에어컨 제어 명령이 전송되었습니다.")
                 return True, speech
             except json.JSONDecodeError:
-                print(f"[오류] 에어컨 스크립트 응답이 올바르지 않음: {output}")
                 return True, "에어컨 제어 중 스크립트 오류가 발생했습니다."
-                
         except Exception as e:
             print(f"[오류] 에어컨 스크립트 실행 실패: {e}")
             return True, "에어컨 스크립트를 실행할 수 없습니다."
             
-    # 2. 기타 기기 (차후 에어컨과 동일하게 모듈화 가능)
-    elif found_target in ["조명", "환풍기"]:
+    # 🌟 2. 조명(전등/라이트) 제어 완벽 매핑
+    elif found_target in ["조명", "전등", "라이트"]:
+        pwm_value = None
+        action_text = ""
+        
+        # 단계 및 전원 상태 파악
+        if "1단계" in user_text:
+            pwm_value = 10
+            action_text = "1단계(10%)로 조절했습니다."
+        elif "2단계" in user_text:
+            pwm_value = 50
+            action_text = "2단계(50%)로 조절했습니다."
+        elif "3단계" in user_text:
+            pwm_value = 90
+            action_text = "3단계(90%)로 조절했습니다."
+        elif "꺼" in user_text:
+            pwm_value = 0
+            action_text = "껐습니다."
+        elif "켜" in user_text:
+            pwm_value = 100 # 기본 켜기는 100%로 설정
+            action_text = "켰습니다."
+            
+        # 값이 지정되었으면 쉘 스크립트 실행
+        if pwm_value is not None:
+            try:
+                print(f"[명령 실행] ./send_pwm.sh light {pwm_value}")
+                subprocess.run(["./send_pwm.sh", "light", str(pwm_value)])
+                return True, f"네, {found_target}을 {action_text}"
+            except Exception as e:
+                print(f"[오류] 조명 쉘 스크립트 실행 실패: {e}")
+                return True, "조명 제어 중 시스템 오류가 발생했습니다."
+        else:
+            # "전등"이라는 말은 들렸는데 어떻게 하라는 건지 모를 경우 LLM에게 판단을 넘김
+            return False, None
+
+    # 3. 환풍기 임시 제어
+    elif found_target == "환풍기":
         action = None
         if "켜" in user_text: action = "켜줘"
         elif "꺼" in user_text: action = "꺼줘"
@@ -104,17 +126,14 @@ def handle_direct_command(user_text):
         val_match = re.search(r"(\d+)(단)", user_text)
         value = val_match.group(1) if val_match else None
         
-        # 파라미터가 부족하면 그냥 LLM이 자연스럽게 되묻도록 넘김
         if not action or (action == "켜줘" and not value):
             return False, None
             
-        print(f"[임시 제어] 대상: {found_target}, 명령: {action}, 값: {value}")
         return True, f"{found_target}을 {value + '단으로 ' if value else ''}{action} 처리했습니다."
 
 CONV_DIR = "@conversation"
 
 def save_conversation(user_text, llm_reply):
-    """대화 내용을 계층적 폴더에 저장"""
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     daily_dir = os.path.join(CONV_DIR, today)
     os.makedirs(daily_dir, exist_ok=True)
@@ -123,18 +142,15 @@ def save_conversation(user_text, llm_reply):
     file_path = os.path.join(daily_dir, f"{session_id}.json")
     
     data = {"timestamp": datetime.datetime.now().isoformat(), "user_input": user_text, "ai_response": llm_reply}
-    
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[오류] 대화 기록 저장 실패: {e}")
+        pass
 
 async def get_relevant_context(user_text):
-    """기존 대화 기록 중 연관성 있는 내용을 추출하여 반환 (llama 3b 활용)"""
     if not os.path.exists(CONV_DIR):
         return ""
-        
     all_convs = []
     for root, _, files in os.walk(CONV_DIR):
         for file in files:
@@ -144,73 +160,52 @@ async def get_relevant_context(user_text):
                         all_convs.append(json.load(f))
                 except:
                     pass
-                    
     if not all_convs:
         return ""
-        
     try:
-        # 1. llama 1b로 키워드 추출
-        extract_prompt = "다음 문장에서 중요한 단어나 개체명(예: 사람 이름, 장소, 사물 등)만 쉼표로 구분해서 말해. 부가 설명 절대 금지."
+        extract_prompt = "다음 문장에서 중요한 단어나 개체명만 쉼표로 구분해서 말해. 부가 설명 절대 금지."
         resp = await AsyncClient().chat(model='llama3.2:3b', messages=[
             {'role': 'system', 'content': extract_prompt},
             {'role': 'user', 'content': user_text}
         ])
         keywords = [k.strip() for k in resp['message']['content'].split(',') if k.strip()]
         
-        # 2. 키워드 기반 필터링
         relevant_convs = []
         for conv in all_convs:
             conv_text = conv.get("user_input", "") + " " + conv.get("ai_response", "")
             if any(k in conv_text for k in keywords):
                 relevant_convs.append(conv)
                 
-        # 최근 3개만 반환
         relevant_convs = sorted(relevant_convs, key=lambda x: x.get("timestamp", ""), reverse=True)[:3]
-        if not relevant_convs:
-            return ""
+        if not relevant_convs: return ""
             
         context_str = "\n[과거 연관 대화 기록]\n"
         for c in relevant_convs:
             context_str += f"User: {c.get('user_input')}\nAI: {c.get('ai_response')}\n---\n"
         return context_str
-    except Exception as e:
-        print(f"[오류] 컨텍스트 추출 실패: {e}")
+    except Exception:
         return ""
 
 async def speak_text(text):
-    """TTS로 스피커 출력"""
     audio_file = "reply.mp3"
     try:
         communicate = edge_tts.Communicate(text, "ko-KR-SunHiNeural")
         await communicate.save(audio_file)
-        # pygame.mixer.music.load(audio_file)
-        # pygame.mixer.music.play()
-        # while pygame.mixer.music.get_busy():
-        #     await asyncio.sleep(0.1)
-        # pygame.mixer.music.unload()
-        # if os.path.exists(audio_file): os.remove(audio_file)
     except Exception as e:
         print(f"[오류] TTS 재생 실패: {e}")
 
 # --- 3. 핵심 AI 처리 파이프라인 ---
 async def process_command(user_text, require_alias=False):
-    """
-    사용자의 입력을 분석하고 스크립트를 실행한 뒤 대답을 반환합니다.
-    리턴값: (source: "direct" | "llm" | "error" | None, reply_text: str | None)
-    """
-    
     agent_prompt = read_file("Agent.md")
     alias = get_alias(agent_prompt)
     
     if require_alias and alias not in user_text:
-        return None, None # 별명이 불리지 않으면 무시
+        return None, None 
         
-    # 직접 제어 가능한지 확인 (LLM 생략)
     is_direct, direct_reply = handle_direct_command(user_text)
     if is_direct:
         return "direct", direct_reply
     
-    # 키워드 검사 및 스킬 문서 추가
     skill_context = ""
     if "에어컨" in user_text:
         skill_context = read_file("Aircon/Aircon.md")
@@ -228,11 +223,9 @@ async def process_command(user_text, require_alias=False):
         
         llm_reply = response['message']['content'].strip()
         
-        # 일반 대화일 경우 저장
         if "action" not in llm_reply or "{" not in llm_reply:
              save_conversation(user_text, llm_reply)
         
-        # JSON 파싱 및 파이썬 파일 실행
         try:
             data = json.loads(llm_reply)
             action = data.get("action")
@@ -240,20 +233,15 @@ async def process_command(user_text, require_alias=False):
             val = data.get("value")
             speech = data.get("speech", "알겠습니다.")
             
-            # 하드웨어 제어 분기
             if action == "execute" and target == "에어컨":
-                print(f"[실행] 에어컨 제어: {val}")
                 subprocess.run(["python3", "Aircon/aircon.py", str(val)])
-                
             elif action == "execute" and target == "환풍기":
-                # 추후 환풍기 제어 파이썬 스크립트 연결
                 pass 
                 
             save_conversation(user_text, speech)
             return "llm", speech
             
         except json.JSONDecodeError:
-            # JSON 포맷이 아닐 경우(일반 대화) 그대로 반환
             return "llm", llm_reply
             
     except Exception as e:
@@ -261,24 +249,8 @@ async def process_command(user_text, require_alias=False):
 
 # --- 4. 백그라운드 마이크 대기 루프 ---
 def listen_microphone():
-    """마이크 입력을 처리하는 동기 함수 (스레드에서 실행됨)"""
     hints = get_stt_hints()
-    
-    # # 1. 자동 마이크 인식 로직 (USB 마이크 찾기)
-    # mic_index = None
-    # mic_list = sr.Microphone.list_microphone_names()
-    # for index, name in enumerate(mic_list):
-    #     if "USB" in name or "hw:2" in name:
-    #         mic_index = index
-    #         break
-            
-    # if mic_index is None and len(mic_list) > 0:
-    #     mic_index = 0 # 못찾으면 첫 번째 장치 사용
-        
     recognizer = sr.Recognizer()
-    
-    # 2. USB 마이크의 경우 sample_rate를 48000 또는 44100으로 명시해야 ALSA 오류/튕김이 잡힙니다.
-    # 인덱스 0번이 안 되었던 이유는 샘플레이트 문제일 확률이 높습니다.
     microphone = sr.Microphone(device_index= 0, sample_rate=48000)
     
     with microphone as source:
@@ -287,7 +259,6 @@ def listen_microphone():
         recognizer.pause_threshold = 1.2
         try:
             audio = recognizer.listen(source, timeout=2, phrase_time_limit=10)
-            
             with open("temp.wav", "wb") as f:
                 f.write(audio.get_wav_data())
                 
@@ -299,12 +270,10 @@ def listen_microphone():
         except sr.WaitTimeoutError:
             return None
         except Exception as e:
-            # 🚨 [수정 2] 문제가 생기면 조용히 멈추지 않고 터미널에 에러를 띄워주게 변경
             print(f"❌ [마이크 인식 오류] {e}") 
             return None
 
 async def voice_background_task():
-    """디스코드 봇과 겹치지 않게 비동기로 마이크를 계속 감시합니다."""
     await client.wait_until_ready()
     print("[시스템] 마이크 상시 대기 모드 시작...")
     
@@ -313,8 +282,6 @@ async def voice_background_task():
         
         if user_text:
             print(f"[음성 인식] {user_text}")
-            
-            # 음성 입력은 별명 필수
             source, reply_text = await process_command(user_text, require_alias=True)
             
             if reply_text:
@@ -323,7 +290,6 @@ async def voice_background_task():
                     await channel.send(f"**[음성 명령 수신]** {user_text}")
                     prefix = "**🤖 [로컬 하드웨어 봇] 엣지단 즉시 제어**" if source == "direct" else "**🧠 [로컬 LLM 답변] 문맥 추론**"
                     await channel.send(f"{prefix}\n{reply_text}")
-                    
                 await speak_text(reply_text)
 
 # --- 5. 디스코드 봇 이벤트 ---
@@ -332,7 +298,6 @@ async def on_ready():
     global LOG_CHANNEL_ID
     print(f"[시스템] 디스코드 봇 [{client.user}] 온라인!")
     
-    # 봇이 참여 중인 서버의 첫 번째 텍스트 채널을 로그 채널로 자동 설정
     for guild in client.guilds:
         for channel in guild.text_channels:
             if channel.permissions_for(guild.me).send_messages:
@@ -345,20 +310,14 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    # 봇 자신이 보낸 메시지는 무한 루프 방지를 위해 무시
     if message.author == client.user: 
         return
 
-    # '!제어' 확인 로직을 없애고 모든 메시지를 명령어로 받아들입니다.
     user_command = message.content.strip()
-    
-    # 아무 내용도 없는 빈 메시지라면 무시
     if not user_command:
         return
         
-    # 명령어 처리 (직접 제어이든 LLM 이든 내부에서 알아서 분기)
     status_msg = await message.channel.send("⏳ 명령을 처리 중입니다...")
-    
     source, reply_text = await process_command(user_command, require_alias=False)
     
     if source == "direct":
@@ -368,5 +327,4 @@ async def on_message(message):
     else:
         await status_msg.edit(content=f"**[시스템 오류]**\n{reply_text}")
 
-# 봇 실행
 client.run(DISCORD_TOKEN)
